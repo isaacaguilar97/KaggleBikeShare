@@ -7,7 +7,7 @@ library(tidyverse)
 library(vroom)
 library(DataExplorer)
 library(patchwork)
-?patchwork
+
 
 # Load data
 bike <- vroom('./train.csv')
