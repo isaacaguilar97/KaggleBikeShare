@@ -113,7 +113,7 @@ preg_wf <- workflow() %>%
   add_recipe(my_recipe) %>%
   add_model(preg_model)
 
-## Grid of values to tune over14
+## Grid of values to tune over
 tuning_grid <- grid_regular(penalty(),
                             mixture(),
                             levels = 5) ## L^2 total tuning possibilities
@@ -148,6 +148,62 @@ bike_pred_tunned <- final_wf %>%
 
 # clean format
 predictions <- bike_pred_tunned %>% 
+  mutate(datetime = bike_test$datetime) %>%
+  mutate(count = exp(.pred)) %>% # exponentiate lg_count
+  select(datetime, count)
+predictions$datetime <- as.character(format(predictions$datetime))
+
+vroom_write(predictions, 'BikeSharePreds.csv', delim = ",")
+
+
+### Regression Tree ###
+library(tidymodels)
+
+rt_mod <- decision_tree(tree_depth = tune(),
+                        cost_complexity = tune(),
+                        min_n=tune()) %>% #Type of model
+  set_engine("rpart") %>% # Engine = What R function to use
+  set_mode("regression")
+
+## Create a workflow with model & recipe
+my_recipe <- recipe(lg_count~., data=bike_cleaned) %>% # Set model formula and data
+  step_mutate(weather = ifelse(weather == 4, 3, weather)) %>% # where weather is 4 change to 3 (only one value like that)
+  step_date(datetime, features="dow") %>% # gets day of week
+  step_time(datetime, features="hour") %>% # gets hour
+  step_rm('workingday', 'datetime')
+
+rt_wf <- workflow() %>% # map of what to do to replicate code with new data/test data
+  add_recipe(my_recipe) %>%
+  add_model(rt_mod)
+
+## Set up grid of tuning values
+tuning_grid <- grid_regular(tree_depth(),
+                            cost_complexity(),
+                            min_n(),
+                            levels = 3)
+
+## Set up K-fold CV
+folds <- vfold_cv(bike_cleaned, v = 5, repeats=1)
+
+CV_results <- rt_wf %>%
+  tune_grid(resamples=folds,
+            grid=tuning_grid,
+            metrics=metric_set(rmse, mae))
+
+## Find best tuning parameters
+bestTune <- CV_results %>% 
+  select_best("rmse")
+
+## Finalize workflow and predict
+final_wf <- rt_wf %>% 
+  finalize_workflow(bestTune) %>% 
+  fit(data=bike_cleaned)
+
+bike_pred_rt <- final_wf %>%
+  predict(new_data = bike_test)
+
+# clean format
+predictions <- bike_pred_rt %>% 
   mutate(datetime = bike_test$datetime) %>%
   mutate(count = exp(.pred)) %>% # exponentiate lg_count
   select(datetime, count)
