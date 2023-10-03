@@ -31,4 +31,3 @@ plot4 <- ggplot(data=bike, aes(x=windspeed, y=count)) +
 # 4 Panel ggplot
 (plot1 + plot2) / (plot3 + plot4)
 
-

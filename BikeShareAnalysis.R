@@ -179,7 +179,7 @@ rt_wf <- workflow() %>% # map of what to do to replicate code with new data/test
 ## Set up grid of tuning values
 tuning_grid <- grid_regular(tree_depth(),
                             cost_complexity(),
-                            min_n(),
+                            min_n(), # Number of observations in a leaf
                             levels = 3)
 
 ## Set up K-fold CV
@@ -204,6 +204,150 @@ bike_pred_rt <- final_wf %>%
 
 # clean format
 predictions <- bike_pred_rt %>% 
+  mutate(datetime = bike_test$datetime) %>%
+  mutate(count = exp(.pred)) %>% # exponentiate lg_count
+  select(datetime, count)
+predictions$datetime <- as.character(format(predictions$datetime))
+
+vroom_write(predictions, 'BikeSharePreds.csv', delim = ",")
+
+### Random Forest ###
+
+library(tidymodels)
+library(rpart)
+
+rf_mod <- rand_forest(mtry = tune(),
+                      min_n=tune(),
+                      trees=500) %>% #Type of model
+  set_engine("ranger") %>% # What R function to use
+  set_mode("regression")
+
+## Create a workflow with model & recipe
+
+my_recipe <- recipe(lg_count~., data=bike_cleaned) %>% # Set model formula and data
+  step_mutate(weather = ifelse(weather == 4, 3, weather)) %>% # where weather is 4 change to 3 (only one value like that)
+  step_date(datetime, features="dow") %>% # gets day of week
+  step_time(datetime, features="hour") %>% # gets hour
+  step_rm('workingday', 'datetime')
+
+rf_wf <- workflow() %>% # map of what to do to replicate code with new data/test data
+  add_recipe(my_recipe) %>%
+  add_model(rf_mod)
+
+## Set up grid of tuning values
+tuning_grid <- grid_regular(mtry(range = c(1,ncol(bike_cleaned)-1)), # How many Variables to choose from 
+                            # researches have found log of total variables is enough
+                            min_n(), # Number of observations in a leaf
+                            levels = 3)
+
+## Set up K-fold CV (This usually takes sometime)
+folds <- vfold_cv(bike_cleaned, v = 5, repeats=1)
+
+CV_results <- rf_wf %>%
+  tune_grid(resamples=folds,
+            grid=tuning_grid,
+            metrics=metric_set(rmse, mae))
+
+## Find best tuning parameters
+bestTune <- CV_results %>% 
+  select_best("rmse")
+
+## Finalize workflow and predict
+
+final_wf <- rf_wf %>% 
+  finalize_workflow(bestTune) %>% 
+  fit(data=bike_cleaned)
+
+bike_pred_rf <- final_wf %>%
+  predict(new_data = bike_test)
+
+# clean format
+predictions <- bike_pred_rf %>% 
+  mutate(datetime = bike_test$datetime) %>%
+  mutate(count = exp(.pred)) %>% # exponentiate lg_count
+  select(datetime, count)
+predictions$datetime <- as.character(format(predictions$datetime))
+
+vroom_write(predictions, 'BikeSharePreds.csv', delim = ",")
+
+
+# STACKING
+
+library(stacks)
+
+## Split data for CV
+folds <- vfold_cv(bike_cleaned, v = 3, repeats=1)
+
+## Control Settings for Stacking models
+untunedModel <- control_stack_grid()
+tunedModel <- control_stack_resamples()
+
+## Penalized Regression ##
+preg_model <- linear_reg(penalty=tune(),
+                         mixture=tune()) %>% #Set model and tuning
+  set_engine("glmnet") # Function to fit in R
+
+## Set Workflow
+preg_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(preg_model)
+
+## Grid of values to tune over
+tuning_grid <- grid_regular(penalty(),
+                            mixture(),
+                            levels = 5) ## L^2 total tuning possibilities
+
+## Run the CV
+preg_models <- preg_wf %>%
+  tune_grid(resamples=folds,
+            grid=tuning_grid,
+            metrics=metric_set(rmse, mae),
+            control=untunedModel)
+
+### Random Forest
+rf_mod <- rand_forest(mtry = tune(),
+                      min_n=tune(),
+                      trees=250) %>% #Type of model
+  set_engine("ranger") %>% # What R function to use
+  set_mode("regression")
+
+## Create a workflow with model & recipe
+
+rf_wf <- workflow() %>% # map of what to do to replicate code with new data/test data
+  add_recipe(my_recipe) %>%
+  add_model(rf_mod)
+
+## Set up grid of tuning values
+tuning_grid <- grid_regular(mtry(range = c(1,ncol(bike_cleaned)-1)), # How many Variables to choose from 
+                            # researches have found log of total variables is enough
+                            min_n(), # Number of observations in a leaf
+                            levels = 3)
+
+rf_models <- rf_wf %>%
+  tune_grid(resamples=folds,
+            grid=tuning_grid,
+            metrics=metric_set(rmse, mae),
+            control = untunedModel)
+
+## Specify with models to include
+bike_stack <- stacks() %>%
+  add_candidates(preg_models) %>%
+  add_candidates(rf_models) 
+
+# Fit the stacked model
+fitted_bike_stack <-  bike_stack %>%
+  blend_predictions() %>%
+  fit_members()
+
+# as_tibble(bike_stack)
+# collect_parameters(fitted_bike_stack, "tree_folds_fit")
+
+#Predict
+bike_pred_stack <- fitted_bike_stack %>%
+  predict(new_data = bike_test)
+
+# clean format
+predictions <- bike_pred_stack %>% 
   mutate(datetime = bike_test$datetime) %>%
   mutate(count = exp(.pred)) %>% # exponentiate lg_count
   select(datetime, count)
